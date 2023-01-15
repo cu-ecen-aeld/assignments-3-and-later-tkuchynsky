@@ -63,8 +63,6 @@ cd ${OUTDIR}/rootfs
 mkdir bin dev etc home lib lib64 proc sbin sys tmp usr var conf
 mkdir usr/bin usr/lib64 usr/sbin var/log
 
-tree -d
-
 cd "$OUTDIR"
 if [ ! -d "${OUTDIR}/busybox" ]
 then
