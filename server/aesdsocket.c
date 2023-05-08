@@ -158,7 +158,10 @@ int main(int argc, char* argv[] )
             exit(EXIT_FAILURE);
         }
 
-        chdir("/");
+        if(chdir("/"))
+        {
+            exit(EXIT_FAILURE);
+        }
 
         close(STDIN_FILENO);
         close(STDOUT_FILENO);
