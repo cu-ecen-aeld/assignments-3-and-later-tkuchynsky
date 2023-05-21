@@ -7,15 +7,14 @@ endif
 endif
 
 CC = $(CROSS_COMPILE)gcc
-CFLAGS= -Wall -Werror
-
+CFLAGS= -Wall -Werror -g
 .PHONY: default
 default: all
 
 all: aesdsocket
 
 aesdsocket: aesdsocket.c
-	${CC} ${CFLAGS} -g aesdsocket.c -o aesdsocket
+	${CC} ${CFLAGS} -pthread aesdsocket.c -o aesdsocket
 
 clean:
 	rm -f aesdsocket

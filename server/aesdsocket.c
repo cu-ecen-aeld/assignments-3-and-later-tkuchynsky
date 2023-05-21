@@ -12,6 +12,9 @@
 #include <string.h>
 #include <syslog.h>
 #include <fcntl.h>
+#include <sys/queue.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 #define DATA_FILE_NAME "/var/tmp/aesdsocketdata"
 
@@ -20,7 +23,26 @@
 
 #define LOG_IDENT "aesdsocket"
 
-int is_canceled = 0;
+#define TIMER_INTERVAL_SEC 10
+
+atomic_int is_canceled = 0;
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct _thread_args
+{
+    pthread_mutex_t * mutex;
+    atomic_int * canceled;
+    atomic_int finished;
+    int sock_fd;
+} thread_args;
+typedef struct node
+{   
+    TAILQ_ENTRY(node) nodes;
+    pthread_t thread;
+
+    thread_args args;
+} list_node;
 
 void log_message_form(const char* formString, const char* msgString)
 {
@@ -134,6 +156,65 @@ void sigchld_handler(int signal)
     is_canceled = 1;
 }
 
+void * worker(void * arg)
+{
+    thread_args * e = (thread_args *)arg;
+    if(receive_message_and_append_file(e->sock_fd) == 0)
+    {
+        pthread_mutex_lock(e->mutex);
+        send_message_from_file(e->sock_fd);
+        pthread_mutex_unlock(e->mutex);
+
+    }
+    return NULL;
+}
+
+void * timer(void * arg)
+{
+    thread_args * e = (thread_args *)arg;
+    while(!(*e->canceled))
+    {
+        sleep(TIMER_INTERVAL_SEC);
+
+        pthread_mutex_lock(e->mutex);
+
+        FILE * data_file = fopen(DATA_FILE_NAME, "ab");
+        if(data_file == NULL)
+        {
+            log_message("Cannot open file: " DATA_FILE_NAME);
+            break;
+        }
+
+        time_t t;
+        struct tm *tmp;
+
+        t = time(NULL);
+        tmp = localtime(&t);
+        if (tmp == NULL)
+        {
+            log_message("error: localtime");
+            break;
+        }
+        
+        char buff[BUFFER_SIZE];
+        strftime(buff, BUFFER_SIZE, "timestamp: %Y, %m, %d, %H, %M, %S\n", tmp);
+        int ret = fputs(buff, data_file);
+
+        if(ret <= 0)
+        {
+            fclose(data_file);
+            log_message("Cannot modify file");
+            break;
+        }
+
+        fclose(data_file);
+
+        pthread_mutex_unlock(e->mutex);
+
+    }
+    return NULL;
+}
+
 int main(int argc, char* argv[] )
 {
     const char * arg_string = argv[1];
@@ -187,11 +268,11 @@ int main(int argc, char* argv[] )
 
     if (sigaction(SIGINT, &sig_action, NULL) == -1) {
         log_message("sigaction failed");
-        EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
     if (sigaction(SIGTERM, &sig_action, NULL) == -1) {
         log_message("sigaction failed");
-        EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     int sock_fd;
@@ -241,42 +322,86 @@ int main(int argc, char* argv[] )
 
     if (sock_fd == -1) {
        log_message("server: failed to bind");
-       EXIT_FAILURE;
+       exit(EXIT_FAILURE);
     }
 
     if (listen(sock_fd, 5) == -1) {
         close(sock_fd);
-        EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
+    thread_args args = {};
+    args.sock_fd = -1;
+    args.mutex = &mutex;
+    args.canceled = &is_canceled;
+    pthread_t timer_thread;
+    pthread_create(&timer_thread, NULL, timer, &args);
+
     log_message("server: waiting for connections...");
+
+    TAILQ_HEAD(list_node, node) head;
+    TAILQ_INIT(&head);
 
     while(!is_canceled)
     {
         sin_size = sizeof their_addr;
-        int new_fd = accept(sock_fd, (struct sockaddr *)&their_addr, &sin_size);
-        if (new_fd == -1) {
+        int accepted_sock_fd = accept(sock_fd, (struct sockaddr *)&their_addr, &sin_size);
+        if (accepted_sock_fd == -1) {
             continue;
         }
-
+        
         inet_ntop(their_addr.ss_family,
             get_in_addr((struct sockaddr *)&their_addr),
             s, sizeof s);
 
         log_message_form("Accepted connection from %s\n", s);
 
-        if(receive_message_and_append_file(new_fd) == 0)
+        list_node * e = malloc(sizeof(list_node));
+        if (e == NULL)
         {
-            if(send_message_from_file(new_fd))
-            {
-                close(new_fd);
-                break;
-            }
+            log_message("malloc failed");
+            
+            close(accepted_sock_fd);
+            break;
         }
 
-        close(new_fd);
+        e->args.sock_fd = accepted_sock_fd;
+        e->args.mutex = &mutex;
+        e->args.canceled = &is_canceled;
+        e->args.finished = 0;
+  
+        TAILQ_INSERT_TAIL(&head, e, nodes);
 
+        pthread_create(&e->thread, NULL, worker, &e->args);
+
+        list_node * np = NULL; 
+        
+        TAILQ_FOREACH(np, &head, nodes)
+        {
+            if(np->args.finished)
+            {
+                pthread_join(np->thread, NULL);
+
+                close(np->args.sock_fd);
+                TAILQ_REMOVE(&head, np, nodes);
+                free(np);
+            }
+        }
     }
+    {
+        list_node * np = TAILQ_FIRST(&head);
+        while (np != NULL)
+        {
+            pthread_join(np->thread, NULL);
+            close(np->args.sock_fd);
+            
+            list_node * n_next = TAILQ_NEXT(np, nodes);
+            free(np);
+            np = n_next;
+        }
+    }
+
+    pthread_join(timer_thread, NULL);
 
     close(sock_fd);
 
