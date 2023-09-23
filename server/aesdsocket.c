@@ -153,7 +153,20 @@ int send_message_from_file(int sockfd)
 
 void sigchld_handler(int signal)
 {
-    is_canceled = 1;
+    switch(signal){
+        case SIGINT:
+        case SIGTERM:
+        case SIGKILL:
+        {
+            is_canceled = 1;
+        }
+
+        default:
+        {
+            // Don't react
+        }
+    }
+
 }
 
 void * worker(void * arg)
@@ -172,9 +185,19 @@ void * worker(void * arg)
 void * timer(void * arg)
 {
     thread_args * e = (thread_args *)arg;
+
+    time_t start_time = time(NULL);
+
     while(!(*e->canceled))
     {
-        sleep(TIMER_INTERVAL_SEC);
+        usleep(100);
+        time_t current_time = time(NULL);
+        if(difftime(current_time, start_time) < TIMER_INTERVAL_SEC)
+        {
+            continue;
+        }
+
+        start_time = current_time;
 
         pthread_mutex_lock(e->mutex);
 
@@ -185,11 +208,8 @@ void * timer(void * arg)
             break;
         }
 
-        time_t t;
-        struct tm *tmp;
+        struct tm *tmp = localtime(&current_time);
 
-        t = time(NULL);
-        tmp = localtime(&t);
         if (tmp == NULL)
         {
             log_message("error: localtime");
@@ -401,9 +421,10 @@ int main(int argc, char* argv[] )
         }
     }
 
-    pthread_join(timer_thread, NULL);
-
     close(sock_fd);
+    shutdown(sock_fd, SHUT_RDWR);
+
+    pthread_join(timer_thread, NULL);
 
     remove(DATA_FILE_NAME);
     
