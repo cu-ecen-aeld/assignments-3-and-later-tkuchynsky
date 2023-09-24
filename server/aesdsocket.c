@@ -153,7 +153,20 @@ int send_message_from_file(int sockfd)
 
 void sigchld_handler(int signal)
 {
-    is_canceled = 1;
+    switch(signal){
+        case SIGINT:
+        case SIGTERM:
+        case SIGKILL:
+        {
+            is_canceled = 1;
+        }
+
+        default:
+        {
+            // Don't react
+        }
+    }
+
 }
 
 void * worker(void * arg)
@@ -172,9 +185,19 @@ void * worker(void * arg)
 void * timer(void * arg)
 {
     thread_args * e = (thread_args *)arg;
+
+    time_t start_time = time(NULL);
+
     while(!(*e->canceled))
     {
-        sleep(TIMER_INTERVAL_SEC);
+        usleep(100);
+        time_t current_time = time(NULL);
+        if(difftime(current_time, start_time) < TIMER_INTERVAL_SEC)
+        {
+            continue;
+        }
+
+        start_time = current_time;
 
         pthread_mutex_lock(e->mutex);
 
@@ -185,11 +208,8 @@ void * timer(void * arg)
             break;
         }
 
-        time_t t;
-        struct tm *tmp;
+        struct tm *tmp = localtime(&current_time);
 
-        t = time(NULL);
-        tmp = localtime(&t);
         if (tmp == NULL)
         {
             log_message("error: localtime");
@@ -275,14 +295,6 @@ int main(int argc, char* argv[] )
         exit(EXIT_FAILURE);
     }
 
-    int sock_fd;
-
-    struct sockaddr_storage their_addr;
-    socklen_t sin_size;
-
-    char s[INET6_ADDRSTRLEN];
-    int rv;
-
     struct addrinfo hints;
 
     memset(&hints, 0, sizeof hints);
@@ -292,12 +304,15 @@ int main(int argc, char* argv[] )
     hints.ai_flags = AI_PASSIVE;
 
     struct addrinfo *servinfo = NULL;
+    int rv;
 
     if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
         log_message_form("Error in getaddrinfo: %s\n", gai_strerror(rv));
         return 1;
     }
 
+    int sock_fd = -1;
+    
     for(struct addrinfo * p = servinfo; p != NULL; p = p->ai_next) {
         sock_fd = socket(p->ai_family, p->ai_socktype,
                 p->ai_protocol);
@@ -344,12 +359,14 @@ int main(int argc, char* argv[] )
 
     while(!is_canceled)
     {
-        sin_size = sizeof their_addr;
+        struct sockaddr_storage their_addr;
+        socklen_t sin_size = sizeof their_addr;
         int accepted_sock_fd = accept(sock_fd, (struct sockaddr *)&their_addr, &sin_size);
         if (accepted_sock_fd == -1) {
             continue;
         }
         
+        char s[INET6_ADDRSTRLEN];
         inet_ntop(their_addr.ss_family,
             get_in_addr((struct sockaddr *)&their_addr),
             s, sizeof s);
@@ -401,9 +418,10 @@ int main(int argc, char* argv[] )
         }
     }
 
-    pthread_join(timer_thread, NULL);
-
     close(sock_fd);
+    shutdown(sock_fd, SHUT_RDWR);
+
+    pthread_join(timer_thread, NULL);
 
     remove(DATA_FILE_NAME);
     
