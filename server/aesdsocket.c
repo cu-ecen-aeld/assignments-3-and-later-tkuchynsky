@@ -16,7 +16,11 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
+#ifdef USE_AESD_CHAR_DEVICE
+#define DATA_FILE "/dev/aesdchar"
+#else
 #define DATA_FILE_NAME "/var/tmp/aesdsocketdata"
+#endif
 
 #define BUFFER_SIZE 256
 #define PORT "9000"
