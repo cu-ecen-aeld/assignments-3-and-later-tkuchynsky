@@ -1,12 +1,13 @@
 #!/bin/sh
 
 NAME=aesdsocket
+BIN=/usr/bin/aesdsocket
 
 case "$1" in
 
   start)
         echo -n "Starting daemon: "$NAME
-        start-stop-daemon -S $NAME -n $NAME -- -d
+        start-stop-daemon -S $NAME -n -a $BIN $NAME -- -d
         echo "..."
         ;;
   stop)

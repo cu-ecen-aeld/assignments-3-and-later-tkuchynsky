@@ -37,8 +37,6 @@ struct aesd_dev
 
      size_t device_buffer_size;
 
-     size_t device_buffer_capacity;
-
      struct aesd_circular_buffer circular_buffer;
 };
 
