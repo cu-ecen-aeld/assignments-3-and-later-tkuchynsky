@@ -5,9 +5,14 @@ ifdef CROSS_COMPILE
 	CC = $(CROSS_COMPILE)gcc
 endif
 
+# ifneq ($(USE_AESD_CHAR_DEVICE),)
+# # call from kernel build system
+# CCFLAGS += -DUSE_AESD_CHAR_DEVICE=1
+# endif
+
 CC ?= gcc
 
-CCFLAGS += -Wall -Werror -g
+CCFLAGS += -Wall -Werror -g -DUSE_AESD_CHAR_DEVICE=1
 
 .PHONY = default
 default: all

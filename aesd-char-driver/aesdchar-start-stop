@@ -1,0 +1,19 @@
+#!/bin/sh
+
+case "$1" in
+    start)
+        echo "Loading ..."
+        aesdchar_load
+        echo "... done"
+        ;;
+    stop)
+        echo "Unloading ..."
+        aesdchar_unload
+        echo "... done"
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+esac
+
+exit 0

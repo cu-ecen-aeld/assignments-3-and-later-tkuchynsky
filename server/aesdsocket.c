@@ -17,7 +17,7 @@
 #include <stdatomic.h>
 
 #ifdef USE_AESD_CHAR_DEVICE
-#define DATA_FILE "/dev/aesdchar"
+#define DATA_FILE_NAME "/dev/aesdchar"
 #else
 #define DATA_FILE_NAME "/var/tmp/aesdsocketdata"
 #endif
@@ -186,7 +186,8 @@ void * worker(void * arg)
     return NULL;
 }
 
-void * timer(void * arg)
+#ifndef USE_AESD_CHAR_DEVICE
+void *timer(void *arg)
 {
     thread_args * e = (thread_args *)arg;
 
@@ -238,6 +239,7 @@ void * timer(void * arg)
     }
     return NULL;
 }
+#endif
 
 int main(int argc, char* argv[] )
 {
@@ -349,12 +351,14 @@ int main(int argc, char* argv[] )
         exit(EXIT_FAILURE);
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     thread_args args = {};
     args.sock_fd = -1;
     args.mutex = &mutex;
     args.canceled = &is_canceled;
     pthread_t timer_thread;
     pthread_create(&timer_thread, NULL, timer, &args);
+#endif
 
     log_message("server: waiting for connections...");
 
@@ -425,9 +429,11 @@ int main(int argc, char* argv[] )
     close(sock_fd);
     shutdown(sock_fd, SHUT_RDWR);
 
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_join(timer_thread, NULL);
 
     remove(DATA_FILE_NAME);
-    
+#endif
+
     return 0;
 }

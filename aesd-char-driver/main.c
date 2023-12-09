@@ -16,10 +16,11 @@
 #include <linux/printk.h>
 #include <linux/types.h>
 #include <linux/cdev.h>
-#include <linux/fs.h> // file_operations
+#include <linux/fs.h>   // file_operations
+#include <linux/slab.h> // kmalloc()
 #include "aesdchar.h"
-int aesd_major =   0; // use dynamic major
-int aesd_minor =   0;
+int aesd_major = 0; // use dynamic major
+int aesd_minor = 0;
 
 MODULE_AUTHOR("Your Name Here"); /** TODO: fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
@@ -66,13 +67,14 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         return -EINVAL;
     }
 
+    dev = filp->private_data;
+
     if (mutex_lock_interruptible(&dev->device_mutex) != 0)
     {
         PDEBUG("Cannot lock mutex!");
         return -ERESTARTSYS;
     }
 
-    dev = filp->private_data;
     if (dev == NULL)
     {
         mutex_unlock(&dev->device_mutex);
@@ -116,6 +118,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     ssize_t retval = -ENOMEM;
 
     struct aesd_buffer_entry add_entry = {0};
+    size_t count_to_write = 0;
+    char *new_line_char_ptr = NULL;
 
     if (filp == NULL || buf == NULL)
     {
@@ -157,49 +161,41 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         return -EPERM;
     }
 
-    size_t count_to_write = 0;
+    count_to_write = count;
 
-    char *new_line_char = memchr(kernel_buf, '\n', count);
+    new_line_char_ptr = memchr(kernel_buf, '\n', count_to_write);
 
-    if (new_line_char != NULL)
+    if (new_line_char_ptr != NULL)
     {
-        count_to_write = 1 + (new_line_char - kernel_buf);
+        count_to_write = 1 + (new_line_char_ptr - kernel_buf);
     }
 
-    if (dev->device_buffer_size + count_to_write > dev->device_buffer_capacity)
+    dev->device_buffer = krealloc(dev->device_buffer, dev->device_buffer_size + count_to_write, GFP_KERNEL);
+    if (dev->device_buffer == NULL)
     {
-        dev->device_buffer = krealloc(dev->device_buffer, dev->device_buffer_size + count_to_write, GFP_KERNEL);
-        if (dev->device_buffer == NULL)
-        {
-            mutex_unlock(&dev->device_mutex);
-            kfree(kernel_buf);
+        mutex_unlock(&dev->device_mutex);
+        kfree(kernel_buf);
 
-            return -ENOMEM;
-        }
+        return -ENOMEM;
     }
 
     memcpy(dev->device_buffer + dev->device_buffer_size, kernel_buf, count_to_write);
     dev->device_buffer_size += count_to_write;
 
-    if (new_line_char != NULL)
+    if (new_line_char_ptr != NULL)
     {
-        add_entry.buffptr = kernel_buf;
+        add_entry.buffptr = dev->device_buffer;
         add_entry.size = dev->device_buffer_size;
 
         aesd_circular_buffer_add_entry(&dev->circular_buffer, &add_entry);
 
+        dev->device_buffer = NULL;
         dev->device_buffer_size = 0;
-
-        retval = count_to_write;
-    }
-    else
-    {
-        retval = 0;
     }
 
     mutex_unlock(&dev->device_mutex);
 
-    return retval;
+    return count;
 }
 
 struct file_operations aesd_fops = {
@@ -249,7 +245,8 @@ int aesd_init_module(void)
 
     result = aesd_setup_cdev(&aesd_device);
 
-    if( result ) {
+    if (result)
+    {
         unregister_chrdev_region(dev, 1);
     }
     return result;
