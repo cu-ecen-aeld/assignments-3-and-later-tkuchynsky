@@ -17,7 +17,10 @@
 #include <stdatomic.h>
 
 #ifdef USE_AESD_CHAR_DEVICE
+#include <sys/ioctl.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
 #define DATA_FILE_NAME "/dev/aesdchar"
+#define AESDCHAR_IOCSEEKTO_CMD "AESDCHAR_IOCSEEKTO:"
 #else
 #define DATA_FILE_NAME "/var/tmp/aesdsocketdata"
 #endif
@@ -80,17 +83,17 @@ int receive_message_and_append_file(int sockfd)
         return -1;
     }
 
-    unsigned char buf[BUFFER_SIZE];
+    char buf[BUFFER_SIZE];
     int is_more_data = 1;
     do {
     
         ssize_t len = recv(sockfd, buf, BUFFER_SIZE, 0);
-        if(is_canceled)
+        if (len <= 0 || is_canceled)
         {
             break;
         }
 
-        unsigned char * new_line_char = memchr(buf,'\n', len);
+        char *new_line_char = memchr(buf, '\n', len);
 
         if(new_line_char != NULL)
         {
@@ -98,13 +101,27 @@ int receive_message_and_append_file(int sockfd)
             len = new_line_char - buf + 1;
         }
 
-        int ret = fwrite(buf, len, 1,  data_file);
-
-        if(ret <= 0)
+        if (strncmp(buf, AESDCHAR_IOCSEEKTO_CMD, len) == 0)
         {
-            fclose(data_file);
-            log_message("Cannot modify file");
-            return -1;
+            struct aesd_seekto seekto;
+            const char *write_cmd_str = buf + sizeof(AESDCHAR_IOCSEEKTO_CMD);
+            char *write_cmd_separator = memchr(write_cmd_str, ':', len - sizeof(AESDCHAR_IOCSEEKTO_CMD));
+            seekto.write_cmd = strtoul(write_cmd_str, &write_cmd_separator, 10);
+
+            seekto.write_cmd_offset = strtoul(write_cmd_separator + sizeof(char), NULL, 10);
+
+            ioctl(fileno(data_file), AESDCHAR_IOCSEEKTO, &seekto);
+        }
+        else
+        {
+            int ret = fwrite(buf, len, 1, data_file);
+
+            if (ret <= 0)
+            {
+                fclose(data_file);
+                log_message("Cannot modify file");
+                return -1;
+            }
         }
 
     } while (is_more_data && !is_canceled);

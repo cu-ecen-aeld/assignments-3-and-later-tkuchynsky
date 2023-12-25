@@ -19,6 +19,8 @@
 #include <linux/fs.h>   // file_operations
 #include <linux/slab.h> // kmalloc()
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
+
 int aesd_major = 0; // use dynamic major
 int aesd_minor = 0;
 
@@ -49,12 +51,9 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                   loff_t *f_pos)
 {
     ssize_t retval = 0;
-
     struct aesd_dev *dev = NULL;
-
     struct aesd_buffer_entry *entry = NULL;
     size_t offset = 0;
-    void *kernel_data = NULL;
 
     PDEBUG("read %zu bytes with offset %lld", count, *f_pos);
 
@@ -115,8 +114,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                    loff_t *f_pos)
 {
-    ssize_t retval = -ENOMEM;
-
     struct aesd_buffer_entry add_entry = {0};
     size_t count_to_write = 0;
     char *new_line_char_ptr = NULL;
@@ -198,10 +195,82 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     return count;
 }
 
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
+{
+    struct aesd_dev *dev = filp->private_data;
+    loff_t retval = 0;
+
+    if (mutex_lock_interruptible(&dev->device_mutex) != 0)
+    {
+        PDEBUG("Cannot lock mutex!");
+        return -ERESTARTSYS;
+    }
+
+    retval = fixed_size_llseek(filp, off, whence, dev->device_buffer_size);
+
+    if (retval < 0)
+    {
+        retval = -EINVAL;
+    }
+    else
+    {
+        filp->f_pos = retval;
+    }
+
+    mutex_unlock(&dev->device_mutex);
+
+    return retval;
+}
+
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    struct aesd_dev *dev = filp->private_data;
+    loff_t off = 0;
+    struct aesd_buffer_entry *entry = NULL;
+    struct aesd_seekto seekto;
+    size_t n = 0;
+    ssize_t entry_offset = 0;
+
+    /*
+     * extract the type and number bitfields, and don't decode
+     * wrong cmds: return ENOTTY (inappropriate ioctl) before access_ok()
+     */
+    if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC)
+        return -ENOTTY;
+    if (_IOC_NR(cmd) > AESDCHAR_IOC_MAXNR)
+        return -ENOTTY;
+
+    /* Only AESDCHAR_IOCSEEKTO is supporter */
+    if (cmd != AESDCHAR_IOCSEEKTO)
+        return -ENOTTY;
+
+    if (copy_from_user(&seekto, (const char __user *)arg, sizeof(seekto)))
+    {
+        return -EFAULT;
+    }
+
+    if (seekto.write_cmd > AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED ||
+        dev->circular_buffer.entry[seekto.write_cmd].size < seekto.write_cmd_offset)
+    {
+        return -EINVAL;
+    }
+
+    for (n = 0; n < seekto.write_cmd; n++)
+    {
+        off += dev->circular_buffer.entry[n].size;
+    }
+
+    filp->f_pos = off + seekto.write_cmd_offset;
+
+    return 0;
+}
+
 struct file_operations aesd_fops = {
     .owner = THIS_MODULE,
+    .llseek = aesd_llseek,
     .read = aesd_read,
     .write = aesd_write,
+    .unlocked_ioctl = aesd_ioctl,
     .open = aesd_open,
     .release = aesd_release,
 };
