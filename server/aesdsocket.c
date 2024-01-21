@@ -74,15 +74,8 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-int receive_message_and_append_file(int sockfd)
+int receive_message_and_append_file(int sockfd, FILE *data_file)
 {
-    FILE * data_file = fopen(DATA_FILE_NAME, "ab");
-    if(data_file == NULL)
-    {
-        log_message("Cannot open file: " DATA_FILE_NAME);
-        return -1;
-    }
-
     char buf[BUFFER_SIZE];
     int is_more_data = 1;
     do {
@@ -101,14 +94,16 @@ int receive_message_and_append_file(int sockfd)
             len = new_line_char - buf + 1;
         }
 
-        if (strncmp(buf, AESDCHAR_IOCSEEKTO_CMD, len) == 0)
+        const size_t cmd_len = sizeof(AESDCHAR_IOCSEEKTO_CMD) - 1;
+
+        if (len > cmd_len && strncmp(buf, AESDCHAR_IOCSEEKTO_CMD, cmd_len) == 0)
         {
             struct aesd_seekto seekto;
-            const char *write_cmd_str = buf + sizeof(AESDCHAR_IOCSEEKTO_CMD);
-            char *write_cmd_separator = memchr(write_cmd_str, ':', len - sizeof(AESDCHAR_IOCSEEKTO_CMD));
+            const char *write_cmd_str = buf + cmd_len;
+            char *write_cmd_separator = memchr(write_cmd_str, ',', len - cmd_len);
             seekto.write_cmd = strtoul(write_cmd_str, &write_cmd_separator, 10);
 
-            seekto.write_cmd_offset = strtoul(write_cmd_separator + sizeof(char), NULL, 10);
+            seekto.write_cmd_offset = strtoul(write_cmd_separator + 1, NULL, 10);
 
             ioctl(fileno(data_file), AESDCHAR_IOCSEEKTO, &seekto);
         }
@@ -118,7 +113,6 @@ int receive_message_and_append_file(int sockfd)
 
             if (ret <= 0)
             {
-                fclose(data_file);
                 log_message("Cannot modify file");
                 return -1;
             }
@@ -126,31 +120,24 @@ int receive_message_and_append_file(int sockfd)
 
     } while (is_more_data && !is_canceled);
 
-    fclose(data_file);
     return is_canceled;
 }
 
-int send_message_from_file(int sockfd)
+int send_message_from_file(int sockfd, FILE *data_file)
 {
-    FILE * data_file = fopen(DATA_FILE_NAME, "rb");
-    if(data_file == NULL)
-    {
-        log_message("Cannot open file: " DATA_FILE_NAME);
-        return -1;
-    }
-
     unsigned char buffer[BUFFER_SIZE];
 
     size_t len_read = 0;
-    do {
+    do
+    {
 
         len_read = fread(buffer, 1, BUFFER_SIZE, data_file);
-        if(len_read == 0 || is_canceled)
+        if (len_read == 0 || is_canceled)
         {
             break;
         }
 
-        unsigned char * p_data = buffer;
+        unsigned char *p_data = buffer;
         size_t len_data = len_read;
         ssize_t len_send = -1;
         do
@@ -158,63 +145,70 @@ int send_message_from_file(int sockfd)
             len_send = send(sockfd, p_data, len_data, 0);
             if (len_send == -1)
             {
-                fclose(data_file);
                 log_message("Cannot send data");
                 return -1;
             }
         } while (len_send < p_data - buffer);
-        
 
     } while (!feof(data_file) && !is_canceled);
 
-    fclose(data_file);
     return is_canceled;
-
 }
 
 void sigchld_handler(int signal)
 {
-    switch(signal){
-        case SIGINT:
-        case SIGTERM:
-        case SIGKILL:
-        {
-            is_canceled = 1;
-        }
-
-        default:
-        {
-            // Don't react
-        }
+    switch (signal)
+    {
+    case SIGINT:
+    case SIGTERM:
+    case SIGKILL:
+    {
+        is_canceled = 1;
     }
 
+    default:
+    {
+        // Don't react
+    }
+    }
 }
 
-void * worker(void * arg)
+void *worker(void *arg)
 {
-    thread_args * e = (thread_args *)arg;
-    if(receive_message_and_append_file(e->sock_fd) == 0)
+    thread_args *e = (thread_args *)arg;
+
+    FILE *data_file = fopen(DATA_FILE_NAME, "w+");
+    if (data_file == NULL)
+    {
+        log_message("Cannot open file: " DATA_FILE_NAME);
+        close(e->sock_fd);
+        return NULL;
+    }
+
+    if (receive_message_and_append_file(e->sock_fd, data_file) == 0)
     {
         pthread_mutex_lock(e->mutex);
-        send_message_from_file(e->sock_fd);
+        send_message_from_file(e->sock_fd, data_file);
         pthread_mutex_unlock(e->mutex);
-
     }
+    close(e->sock_fd);
+    e->sock_fd = -1;
+
     return NULL;
 }
 
 #ifndef USE_AESD_CHAR_DEVICE
 void *timer(void *arg)
 {
-    thread_args * e = (thread_args *)arg;
+    thread_args *e = (thread_args *)arg;
 
     time_t start_time = time(NULL);
 
-    while(!(*e->canceled))
+    while (!(*e->canceled))
     {
         usleep(100);
         time_t current_time = time(NULL);
-        if(difftime(current_time, start_time) < TIMER_INTERVAL_SEC)
+        if (difftime(current_time, start_time) < TIMER_INTERVAL_SEC)
         {
             continue;
         }
@@ -223,8 +217,8 @@ void *timer(void *arg)
 
         pthread_mutex_lock(e->mutex);
 
-        FILE * data_file = fopen(DATA_FILE_NAME, "ab");
-        if(data_file == NULL)
+        FILE *data_file = fopen(DATA_FILE_NAME, "w+");
+        if (data_file == NULL)
         {
             log_message("Cannot open file: " DATA_FILE_NAME);
             break;
@@ -237,12 +231,12 @@ void *timer(void *arg)
             log_message("error: localtime");
             break;
         }
-        
+
         char buff[BUFFER_SIZE];
         strftime(buff, BUFFER_SIZE, "timestamp: %Y, %m, %d, %H, %M, %S\n", tmp);
         int ret = fputs(buff, data_file);
 
-        if(ret <= 0)
+        if (ret <= 0)
         {
             fclose(data_file);
             log_message("Cannot modify file");
@@ -252,37 +246,36 @@ void *timer(void *arg)
         fclose(data_file);
 
         pthread_mutex_unlock(e->mutex);
-
     }
     return NULL;
 }
 #endif
 
-int main(int argc, char* argv[] )
+int main(int argc, char *argv[])
 {
-    const char * arg_string = argv[1];
+    const char *arg_string = argv[1];
 
-    if(argc == 2 && strncmp(arg_string, "-d", strlen(arg_string)) == 0)
+    if (argc == 2 && strncmp(arg_string, "-d", strlen(arg_string)) == 0)
     {
         log_message("Run as a daemon ...");
-        
+
         pid_t pid = fork();
 
-        if(pid > 0)
+        if (pid > 0)
         {
-            exit(EXIT_SUCCESS);   // main process
+            exit(EXIT_SUCCESS); // main process
         }
-        if(pid < 0)
+        if (pid < 0)
         {
-            exit(EXIT_FAILURE);   // fail
+            exit(EXIT_FAILURE); // fail
         }
 
-        if(setsid() < 0)
+        if (setsid() < 0)
         {
             exit(EXIT_FAILURE);
         }
 
-        if(chdir("/"))
+        if (chdir("/"))
         {
             exit(EXIT_FAILURE);
         }
@@ -291,13 +284,16 @@ int main(int argc, char* argv[] )
         close(STDOUT_FILENO);
         close(STDERR_FILENO);
 
-        if (open("/dev/null",O_RDONLY) == -1) {
+        if (open("/dev/null", O_RDONLY) == -1)
+        {
             log_message("failed to reopen stdin");
         }
-        if (open("/dev/null",O_WRONLY) == -1) {
+        if (open("/dev/null", O_WRONLY) == -1)
+        {
             log_message("failed to reopen stdout");
         }
-        if (open("/dev/null",O_RDWR) == -1) {
+        if (open("/dev/null", O_RDWR) == -1)
+        {
             log_message("failed to reopen stderr");
         }
 
@@ -309,11 +305,13 @@ int main(int argc, char* argv[] )
 
     sig_action.sa_handler = sigchld_handler;
 
-    if (sigaction(SIGINT, &sig_action, NULL) == -1) {
+    if (sigaction(SIGINT, &sig_action, NULL) == -1)
+    {
         log_message("sigaction failed");
         exit(EXIT_FAILURE);
     }
-    if (sigaction(SIGTERM, &sig_action, NULL) == -1) {
+    if (sigaction(SIGTERM, &sig_action, NULL) == -1)
+    {
         log_message("sigaction failed");
         exit(EXIT_FAILURE);
     }
@@ -329,25 +327,30 @@ int main(int argc, char* argv[] )
     struct addrinfo *servinfo = NULL;
     int rv;
 
-    if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
+    if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0)
+    {
         log_message_form("Error in getaddrinfo: %s\n", gai_strerror(rv));
         return 1;
     }
 
     int sock_fd = -1;
-    
-    for(struct addrinfo * p = servinfo; p != NULL; p = p->ai_next) {
+
+    for (struct addrinfo *p = servinfo; p != NULL; p = p->ai_next)
+    {
         sock_fd = socket(p->ai_family, p->ai_socktype,
-                p->ai_protocol);
-        if (sock_fd == -1) {
+                         p->ai_protocol);
+        if (sock_fd == -1)
+        {
             continue;
         }
         int is_ok = 1;
-        if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &is_ok, sizeof(is_ok)) == -1) {
+        if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &is_ok, sizeof(is_ok)) == -1)
+        {
             break;
         }
 
-        if (bind(sock_fd, p->ai_addr, p->ai_addrlen) == -1) {
+        if (bind(sock_fd, p->ai_addr, p->ai_addrlen) == -1)
+        {
             close(sock_fd);
             continue;
         }
@@ -358,13 +361,14 @@ int main(int argc, char* argv[] )
     freeaddrinfo(servinfo);
     servinfo = NULL;
 
-    if (sock_fd == -1) {
-       log_message("server: failed to bind");
-       exit(EXIT_FAILURE);
+    if (sock_fd == -1)
+    {
+        log_message("server: failed to bind");
+        exit(EXIT_FAILURE);
     }
 
-    if (listen(sock_fd, 5) == -1) {
-        close(sock_fd);
+    if (listen(sock_fd, 5) == -1)
+    {
         exit(EXIT_FAILURE);
     }
 
@@ -390,11 +394,11 @@ int main(int argc, char* argv[] )
         if (accepted_sock_fd == -1) {
             continue;
         }
-        
+
         char s[INET6_ADDRSTRLEN];
         inet_ntop(their_addr.ss_family,
-            get_in_addr((struct sockaddr *)&their_addr),
-            s, sizeof s);
+                  get_in_addr((struct sockaddr *)&their_addr),
+                  s, sizeof s);
 
         log_message_form("Accepted connection from %s\n", s);
 
@@ -402,7 +406,7 @@ int main(int argc, char* argv[] )
         if (e == NULL)
         {
             log_message("malloc failed");
-            
+
             close(accepted_sock_fd);
             break;
         }
@@ -411,20 +415,19 @@ int main(int argc, char* argv[] )
         e->args.mutex = &mutex;
         e->args.canceled = &is_canceled;
         e->args.finished = 0;
-  
+
         TAILQ_INSERT_TAIL(&head, e, nodes);
 
         pthread_create(&e->thread, NULL, worker, &e->args);
 
-        list_node * np = NULL; 
-        
+        list_node *np = NULL;
+
         TAILQ_FOREACH(np, &head, nodes)
         {
             if(np->args.finished)
             {
                 pthread_join(np->thread, NULL);
 
-                close(np->args.sock_fd);
                 TAILQ_REMOVE(&head, np, nodes);
                 free(np);
             }
@@ -435,8 +438,7 @@ int main(int argc, char* argv[] )
         while (np != NULL)
         {
             pthread_join(np->thread, NULL);
-            close(np->args.sock_fd);
-            
+
             list_node * n_next = TAILQ_NEXT(np, nodes);
             free(np);
             np = n_next;
